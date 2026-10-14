@@ -1,5 +1,7 @@
+import {compareSessions} from './compare.js';
 const $=id=>document.getElementById(id);
 let rows=[],headers=[],items=[],selected=0,busy=false;
+let previousRows=[],previousHeaders=[],comparison=null;
 const formats={plenary:[5632,1792],lab1:[24576,1792],labs:[3360,1344],dome:[2016,1008]};
 function stageKey(stage){if(['Plenary A','Plenary B'].includes(stage))return 'plenary';const lab=stage.match(/\bLAB\s*([1-5])\b/i);if(lab)return 'lab'+lab[1];if(stage==='Dome - PITCH')return 'dome';return null;}
 function dimensions(stage){const key=stageKey(stage);return key?formats[key]||formats.labs:null;}
@@ -16,12 +18,35 @@ function parseCSV(s){
  row.push(cell);if(row.some(x=>x.trim()))result.push(row);return result;
 }
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
+function readSessions(source, columns, idColumn) {
+ const title=columns.indexOf($('column').value),stage=columns.indexOf('Stage Placement Final'),id=columns.indexOf(idColumn);
+ if(title<0)throw Error('Os dois CSVs precisam da mesma coluna de títulos selecionada.');
+ return source.map((r,i)=>({title:(r[title]||'').trim(),stage:stage<0?'':(r[stage]||'').trim(),id:i+1,key:id<0?'':(r[id]||'').trim()}));
+}
+function showComparison() {
+ const box=$('diff-details');box.replaceChildren();
+ if(!comparison){$('only-changes').checked=false;$('only-changes').disabled=true;$('diff-report').disabled=true;return;}
+ $('only-changes').disabled=false;$('diff-report').disabled=false;
+ const counts={added:0,changed:0,unchanged:0};for(const item of comparison.entries)counts[item.change]++;
+ $('diff-summary').textContent=`${counts.added} novos · ${counts.changed} alterados · ${comparison.removed.length} removidos · ${counts.unchanged} iguais (todos os palcos)`;
+ const labels={added:'Novo',changed:'Alterado',removed:'Removido'};
+ const entries=[...comparison.entries.filter(r=>r.change!=='unchanged'),...comparison.removed.map(r=>({...r,change:'removed'}))].filter(r=>matchesStage(r.stage)||(r.before&&matchesStage(r.before.stage)));
+ for(const item of entries){const line=document.createElement('p');line.className='hint';line.textContent=`${labels[item.change]} · ${item.key} · ${item.stage}: ${item.title}`;if(item.change==='changed')line.textContent+=` ← Antes: ${item.before.stage}: ${item.before.title}`;box.append(line);}
+ if(!entries.length)box.textContent='Sem diferenças no filtro de palco selecionado.';
+}
 function refill(){
- const col=headers.indexOf($('column').value),stage=headers.indexOf('Stage Placement Final');
- items=rows.map((r,i)=>({title:r[col]||'',stage:stage<0?'':(r[stage]||'').trim(),id:i+1})).filter(r=>r.title.trim()&&matchesStage(r.stage));
- selected=0;$('session').replaceChildren(...items.map((r,i)=>option(i,`${r.id} · ${r.title}`)));
+ const stage=headers.indexOf('Stage Placement Final');
+ const idColumn=['Session Record ID','Shorthand Session Record ID'].find(c=>headers.includes(c)&&(!previousHeaders.length||previousHeaders.includes(c)));
+ let current=readSessions(rows,headers,idColumn);
+ comparison=null;
+ if(previousHeaders.length){try{comparison=compareSessions(current,readSessions(previousRows,previousHeaders,idColumn));current=comparison.entries;}catch(e){$('diff-summary').textContent=e.message;}}
+ else $('diff-summary').textContent='Importa os dois CSVs para comparar.';
+ showComparison();
+ items=current.filter(r=>r.title.trim()&&matchesStage(r.stage)&&(!$('only-changes').checked||['added','changed'].includes(r.change)));
+ selected=0;$('session').replaceChildren(...items.map((r,i)=>option(i,`${r.change==='added'?'[Novo] ':r.change==='changed'?'[Alterado] ':''}${r.id} · ${r.title}`)));
  $('text').value=items[0]?.title||'';$('count').textContent=`${items.length} sessões selecionadas${stage<0?' · CSV sem coluna de palco; seleciona Todos os palcos.':''}`;applyFormat();render();
 }
+
 function settings(){
  const n=id=>Number($(id).value);
  const s={w:n('width'),h:n('height'),x:n('x'),y:n('y'),size:n('size')*n('scale')/100,scale:n('scale')/100,leading:n('leading'),limit:n('limit'),color:$('color').value,align:$('align').value,capital:$('case').value,colon:$('colon').checked,shadow:$('shadow').checked,opacity:n('opacity')/100,angle:n('angle'),distance:n('distance'),blur:n('blur')};
@@ -50,17 +75,20 @@ const encoder=new TextEncoder();
 function crc32(bytes){let crc=0xffffffff;for(const b of bytes){crc^=b;for(let i=0;i<8;i++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}return (crc^0xffffffff)>>>0;}
 // ZIP entries are stored without extra compression: PNGs are already compressed.
 function zip(files){const chunks=[],central=[];let offset=0,centralSize=0;for(const f of files){const name=encoder.encode(f.name),crc=crc32(f.data),local=new Uint8Array(30+name.length),v=new DataView(local.buffer);v.setUint32(0,0x04034b50,true);v.setUint16(4,20,true);v.setUint16(6,0x800,true);v.setUint32(14,crc,true);v.setUint32(18,f.data.length,true);v.setUint32(22,f.data.length,true);v.setUint16(26,name.length,true);local.set(name,30);chunks.push(local,f.data);const c=new Uint8Array(46+name.length),d=new DataView(c.buffer);d.setUint32(0,0x02014b50,true);d.setUint16(4,20,true);d.setUint16(6,20,true);d.setUint16(8,0x800,true);d.setUint32(16,crc,true);d.setUint32(20,f.data.length,true);d.setUint32(24,f.data.length,true);d.setUint16(28,name.length,true);d.setUint32(42,offset,true);c.set(name,46);central.push(c);centralSize+=c.length;offset+=local.length+f.data.length;}const end=new Uint8Array(22),e=new DataView(end.buffer);e.setUint32(0,0x06054b50,true);e.setUint16(8,files.length,true);e.setUint16(10,files.length,true);e.setUint32(12,centralSize,true);e.setUint32(16,offset,true);return new Blob([...chunks,...central,end],{type:'application/zip'});}
-function filename(item,index){return `${String(index+1).padStart(3,'0')}-${item.title.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g,'-').slice(0,70)||'titulo'}.png`;}
-async function run(fn){busy=true;document.querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=true);try{await fn();}catch(e){$('status').textContent=e.message;}finally{busy=false;document.querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=false);$('column').disabled=!headers.length;}}
+function filename(item,index){if(item.key)return `${item.key.replace(/[^A-Za-z0-9_-]/g,'-')}.png`;return `${String(index+1).padStart(3,'0')}-${item.title.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g,'-').slice(0,70)||'titulo'}.png`;}
+async function run(fn){busy=true;document.querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=true);try{await fn();}catch(e){$('status').textContent=e.message;}finally{busy=false;document.querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=false);$('column').disabled=!headers.length;$('only-changes').disabled=!comparison;$('diff-report').disabled=!comparison;}}
 $('file').addEventListener('change',async()=>{try{const file=$('file').files[0];if(!file)return;const parsed=parseCSV(await file.text());if(parsed.length<2)throw Error('O CSV não contém sessões.');headers=parsed.shift();rows=parsed;$('column').replaceChildren(...headers.map(h=>option(h,h)));$('column').disabled=false;$('column').value=headers.includes('Session Title')?'Session Title':headers[0];if(!headers.includes('Stage Placement Final'))$('stage').value='all';refill();}catch(e){$('status').textContent=e.message;}});
+$('previous').addEventListener('change',async()=>{try{const file=$('previous').files[0];if(!file)return;const parsed=parseCSV(await file.text());if(parsed.length<2)throw Error('O CSV anterior não contém sessões.');previousHeaders=parsed.shift();previousRows=parsed;if(headers.length)refill();else $('diff-summary').textContent='CSV anterior carregado. Importa agora o CSV novo.';}catch(e){$('diff-summary').textContent=e.message;}});
+$('only-changes').addEventListener('change',refill);
+$('diff-report').addEventListener('click',()=>{if(comparison)save(new Blob([JSON.stringify({fields:['title','stage'],...comparison},null,2)],{type:'application/json'}),'diferencas-csv.json');});
 $('column').addEventListener('change',refill);$('stage').addEventListener('change',refill);
 $('session').addEventListener('change',()=>{selected=Number($('session').value);$('text').value=items[selected]?.title||'';applyFormat();render();});
 $('text').addEventListener('input',()=>{if(items[selected])items[selected].title=$('text').value;render();});
-$('manual').addEventListener('click',()=>{items=[];rows=[];headers=[];$('column').replaceChildren();$('column').disabled=true;$('session').replaceChildren(option('','Texto manual'));$('count').textContent='1 título manual';render();});
+$('manual').addEventListener('click',()=>{items=[];rows=[];headers=[];previousRows=[];previousHeaders=[];comparison=null;$('previous').value='';$('diff-summary').textContent='Importa os dois CSVs para comparar.';showComparison();$('column').replaceChildren();$('column').disabled=true;$('session').replaceChildren(option('','Texto manual'));$('count').textContent='1 título manual';render();});
 for(const id of ['width','height','x','y','size','scale','leading','limit','color','align','case','colon','shadow','opacity','angle','distance','blur'])$(id).addEventListener('input',render);
 $('format').addEventListener('change',()=>{applyFormat();render();});
 for(const id of ['width','height'])$(id).addEventListener('input',()=>{$('format').value='custom';render();});
 $('background').addEventListener('change',()=>{$('preview').className=$('background').value;});
-$('download').addEventListener('click',()=>run(async()=>{const s=sessionSettings(settings(),items[selected]||{stage:'Manual'}),text=$('text').value;if(!text.trim())throw Error('Introduz um título.');const c=document.createElement('canvas');const r=draw(text,s,c);if(r.clipped)throw Error('Ajusta o texto: ultrapassa a composição.');save(await blob(c),filename({title:text},selected));$('status').textContent='PNG exportado.';}));
-$('batch').addEventListener('click',()=>run(async()=>{const s=settings(),list=items.length?items.filter(i=>i.title.trim()):[{title:$('text').value,stage:'Manual'}];if(!list.length||!list[0].title.trim())throw Error('Não há títulos para exportar.');const files=[],manifest=[],c=document.createElement('canvas');for(let i=0;i<list.length;i++){const itemSettings=sessionSettings(s,list[i]);const r=draw(list[i].title,itemSettings,c);if(r.clipped)throw Error(`A sessão ${i+1} ultrapassa a composição. Ajusta antes de exportar.`);const name=filename(list[i],i);files.push({name,data:new Uint8Array(await (await blob(c)).arrayBuffer())});manifest.push({...list[i],file:name,width:itemSettings.w,height:itemSettings.h,lines:r.lines,over_character_limit:r.long});$('status').textContent=`A gerar ${i+1} / ${list.length}…`;await new Promise(resolve=>setTimeout(resolve,0));}files.push({name:'manifest.json',data:encoder.encode(JSON.stringify({settings:s,sessions:manifest},null,2))});save(zip(files),'titulos.zip');$('status').textContent=`${list.length} PNGs exportados em ZIP.`;}));
+$('download').addEventListener('click',()=>run(async()=>{const s=sessionSettings(settings(),items[selected]||{stage:'Manual'}),text=$('text').value;if(!text.trim())throw Error('Introduz um título.');const c=document.createElement('canvas');const r=draw(text,s,c);if(r.clipped)throw Error('Ajusta o texto: ultrapassa a composição.');save(await blob(c),filename(items[selected]||{title:text},selected));$('status').textContent='PNG exportado.';}));
+$('batch').addEventListener('click',()=>run(async()=>{const s=settings(),list=headers.length?items.filter(i=>i.title.trim()):[{title:$('text').value,stage:'Manual'}];if(!list.length||!list[0].title.trim())throw Error('Não há títulos para exportar.');const files=[],manifest=[],c=document.createElement('canvas');for(let i=0;i<list.length;i++){const itemSettings=sessionSettings(s,list[i]);const r=draw(list[i].title,itemSettings,c);if(r.clipped)throw Error(`A sessão ${i+1} ultrapassa a composição. Ajusta antes de exportar.`);const name=filename(list[i],i);files.push({name,data:new Uint8Array(await (await blob(c)).arrayBuffer())});manifest.push({...list[i],file:name,width:itemSettings.w,height:itemSettings.h,lines:r.lines,over_character_limit:r.long});$('status').textContent=`A gerar ${i+1} / ${list.length}…`;await new Promise(resolve=>setTimeout(resolve,0));}files.push({name:'manifest.json',data:encoder.encode(JSON.stringify({settings:s,sessions:manifest},null,2))});save(zip(files),'titulos.zip');$('status').textContent=`${list.length} PNGs exportados em ZIP.`;}));
 render();
